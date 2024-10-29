@@ -1,0 +1,3 @@
+"0",""
+"0","# Export table"
+"0","#gtsave(clin_table, filename = ""Clinical Results Table.png"", path = ""Results/"")"

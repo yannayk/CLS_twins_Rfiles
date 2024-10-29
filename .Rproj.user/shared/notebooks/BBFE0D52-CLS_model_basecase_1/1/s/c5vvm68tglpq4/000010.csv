@@ -1,0 +1,78 @@
+"0","# Patients with negative screen have either 1 or 2 scans depending on strategy
+# Patients with positive screen have n_scans (see general setup)
+s1_c_s <- 0
+s2_c_s <- (p_cl25_t1)                                   * (c_s * n_scans) + ((1 - (p_cl25_t1))                                   * c_s * 1) 
+s3_c_s <- (p_cl25_t1 + ((1 - p_cl25_t1) * (p_cl25_t2))) * (c_s * n_scans) + ((1 - (p_cl25_t1 + ((1 - p_cl25_t1) * (p_cl25_t2)))) * c_s * 2)
+
+# Vector of ultrasound costs 
+v_c_s <- c(s1_c_s, s2_c_s, s3_c_s)
+
+## PROGESTERONE ##
+
+# GA distribution for branches with progesterone treatment
+# For s2, this includes only the t1 branches with the final sub-branch excluded
+s2_p <- s2_tree$p
+# Combining t1 and t2 components of the s3 tree (workaround since final sub-branch g is excluded in $p)
+s3_p <- s3_tree$p + ((1 - p_cl25_t1) * s3_t2_branch$p) 
+
+# Prog cost by strategy
+# v_c_wks = cost for a given GA category
+s1_c_p <- 0 # no one on progesterone
+s2_c_p <- sum(s2_p * v_c_wks) 
+s3_c_p <- sum(s3_p * v_c_wks)
+
+# Vector of progesterone costs
+v_c_p  <- c(s1_c_p, s2_c_p, s3_c_p)
+
+## CERCLAGE ##
+
+# Proportion of cases resulting in cerclage by strategy
+s2_cerc <- s2_tree$c
+# Combining t1 and t2 components of the s3 tree (workaround since sub-branch k is excluded in $c)
+s3_cerc <- s3_tree$c + ((1 - p_cl25_t1) * s3_t2_branch$c) 
+
+# Multiply the proportion with cerclage by the per-pregnancy cost
+s1_c_c <- 0
+s2_c_c <- s2_cerc * c_c
+s3_c_c <- s3_cerc * c_c
+
+# Vector of cerclage costs
+v_c_cerc <- c(s1_c_c, s2_c_c, s3_c_c)
+
+## DELIVERY COST ##
+
+# Weighted total cost for delivery with GA distribution 
+s1_c_del <- sum(s1_GA * v_c_del_GA)
+s2_c_del <- sum(s2_GA * v_c_del_GA)
+s3_c_del <- sum(s3_GA * v_c_del_GA)
+
+# Vector of delivery costs by strategy
+v_c_del <- c(s1_c_del, s2_c_del, s3_c_del)
+
+## TOTAL COSTS BY STRATEGY ##
+
+# Vector of total tree-associated costs
+v_tree_c <- v_c_s + v_c_p + v_c_cerc + v_c_del 
+
+# Summary of costs by strategy
+m_tree_c <- rbind(v_c_s, v_c_p, v_c_cerc, v_c_del, v_tree_c)
+m_tree_c2 <- cbind(v_c_s, v_c_p, v_c_cerc, v_c_del, v_tree_c)
+colnames(m_tree_c) <- v_strats
+rownames(m_tree_c) <- c(""US"", ""Progesterone"", ""Cerclage"", ""Delivery"", ""TOTAL"")
+
+preg_costs <- cbind(Component = rownames(m_tree_c), data.frame(round(m_tree_c, 2), row.names = NULL))
+
+preg_cost_table <- gt(preg_costs) %>%
+  tab_header(title = ""Pregnancy-related Costs"",
+             subtitle = ""prices in Canadian $"") %>%
+  tab_style(style = list(cell_text(weight = ""bold"")),
+            locations = cells_body(rows = 5))
+
+preg_cost_table
+"
+"0",""
+"0","# Export table"
+"0","#gtsave(preg_cost_table, filename = ""Pregnancy-related Costs.png"", path = ""Results/"")"
+"0","```"
+"2","Error: attempt to use zero-length variable name
+"

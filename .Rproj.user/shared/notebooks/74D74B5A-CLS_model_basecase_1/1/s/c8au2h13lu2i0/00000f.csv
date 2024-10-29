@@ -1,0 +1,7 @@
+"0","# Tree model with output of GA distribution (shown for one strategy)
+OpenTree::open_tree(file_name = ""Trees/CLS_tree"", dir_name = getwd()) 
+"
+"1","[1]"
+"1"," ""4430A2D9"""
+"1","
+"

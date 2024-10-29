@@ -1,0 +1,1231 @@
+---
+title: "Universal Cervical Length Screening in Twins: Cost-effectiveness Analysis (Base Case 1/2)"
+author: "Yannay Khaikin and Rachel Gladstone"
+date: "2024-10-29"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(OpenTree)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(gt)
+```
+
+### R file flow (steps to run the model)
+
+1. Run the libraries (abo)
+2. Run code in `CLS_model_basecase_2.Rmd` (this includes the time-dependent cSTM parameters: mortality, HRQoL, and cost)
+3. Run the code below
+
+### Model approach
+
+**Three strategies:**
+
+1. s1, no cervical length (CL) screening
+2. s2, single-visit CL screen
+3. s3, two-visit CL screen
+
+**Step #1.** A tree model of pregnancy with output of gestational age distribution. The hypothesis is that s3 > s2 > s1 are able to reduce the rate of pre-term birth by detecting and treating short cervix. The tree incorporates the following variables:
+
+* Short cervix detection rates
+* Given short cervix, effectiveness of progesterone and cerclage at preventing pre-term birth
+* GA distributions are produced given CL and treatment information
+
+**Step #2.** Calculation of *costs* associated with the tree model. All of these costs are counted once for a single twin pregnancy.
+
+1. Ultrasound scans
+2. Progesterone administration
+3. Cerclage administration
+4. Delivery cost
+
+**Step #3.** Utilities and costs associated with the twin children.
+
+* Costs associated with the initial neonatal admission
+* Cohort state transition model (cSTM, aka. Markov chain):
+  + Time horizon: 0-100 years
+  + Two states: Alive (A) and Dead (D)
+  + Includes three age-dependent parameters: mortality, HRQoL, and cost
+  + The cSTM is run for each GA category and the outcomes summed for each strategy based on GA distribution
+
+### Model parameters
+
+```{r}
+## GENERAL SETUP ##
+
+# Modelling population size
+n <- 10^5 
+
+# Multiplier for twins assuming equal outcomes 
+twin_factor <- 2 
+
+# Cycle length (used for conversion to probabilities and cSTM)
+cycle_length <- 1 
+
+# Three strategies:
+  # s1: no cervical length (CL) screening
+  # s2: single-visit CL screen
+  # s3: two-visit CL screen
+v_strats <- c("s1", "s2", "s3")
+n_strats <- length(v_strats)
+
+# Strategy definitions for plotting
+strat_names <- c(s1 = "No screen", s2 = "One-step screen", s3 = "Two-step screen")
+v_strat_colors <- c(s1 = "#F8766D", s2 = "#00BA38", s3 = "#619CFF")
+
+# Gestational age category names
+v_GA_cat <- c("< 28", "28-32", "32-34", "34-37", "> 37")
+n_GA_cat <- length(v_GA_cat)
+
+# Maximum number of scans for patients who screen positive, including screening scans (18, 19, 20, 21, 22, 23, 24)
+n_scans <- 7
+
+# Duration of progesterone intake by GA category
+# Conservative assumptions: all start at 18 weeks and end at 36
+prog_start <- 18
+prog_stop  <- 36
+
+# All patients take to the maximum of their GA category
+wks <- c(28 - prog_start, 
+         32 - prog_start, 
+         34 - prog_start, 
+         prog_stop - prog_start, 
+         prog_stop - prog_start) 
+
+## PROBABILITIES ##
+
+### CL measurement rates
+
+# CL measurement at first visit 1 (t1)
+p_cl25_t1 <- 0.044 # <= 25 mm 
+p_cl15_t1 <- 0.468 # <= P(<15|<=25)
+
+# CL measurement at second visit at +2 wks (t2)
+p_cl25_t2 <- 0.076 # <= P(<25 mm) 
+p_cl15_t2 <- 0.377 # <= P(<15|<=25)
+
+### Treatment uptake
+p_prog    <- 1 # Rate of progesterone use when CL <= 25 mm
+p_pY_cerc <- 1 # Rate of cerclage, given CL <= 15 mm AND progesterone YES
+p_pN_cerc <- 0 # rate of cerclage, given CL <= 15 mm AND progesterone NO
+
+### GA delivery rates given CL screen result
+
+## CL >= 25 mm (screen negative "N")
+# Detected on second screen (t2) 
+p_clN_28_t2 <- 0.011
+p_clN_32_t2 <- 0.026
+p_clN_34_t2 <- 0.062
+p_clN_37_t2 <- 0.573
+
+## CL 15-25 mm
+# Detected on t1 scan
+p_cl25_28_t1 <- 0.118
+p_cl25_32_t1 <- 0.133
+p_cl25_34_t1 <- 0.077
+p_cl25_37_t1 <- 0.500
+  
+# Detected on t2 scan, given t1 negative
+p_cl25_28_t2 <- 0.087
+p_cl25_32_t2 <- 0.119
+p_cl25_34_t2 <- 0.135
+p_cl25_37_t2 <- 0.563
+
+## CL <= 15 mm
+# Detected on first screen (t1)
+p_cl15_28_t1 <- 0.533
+p_cl15_32_t1 <- 0.143
+p_cl15_34_t1 <- 0
+p_cl15_37_t1 <- 0.5
+
+# Detected on second screen (t2)
+p_cl15_28_t2 <- 0.303
+p_cl15_32_t2 <- 0.304
+p_cl15_34_t2 <- 0.063
+p_cl15_37_t2 <- 0.533
+
+# Effectiveness of progesterone (RR)
+rr_p_28 <- 0.53
+rr_p_32 <- 0.83
+rr_p_34 <- 0.83
+rr_p_37 <- 1
+
+# Effectiveness of cerclage alone (RR)
+rr_c_28 <- 0.56
+rr_c_32 <- 0.78
+rr_c_34 <- 0.30
+rr_c_37 <- 1.00
+
+# Effectiveness of cerclage AND progesterone (assumed to be effect of cerclage alone)
+rr_cp_28 <- rr_c_28
+rr_cp_32 <- rr_c_32
+rr_cp_34 <- rr_c_34
+rr_cp_37 <- rr_c_37
+
+## TREE-RELATED COSTS ##
+c_s  <- 75.30  # one ultrasound scan
+c_c  <- 3614.36 # cerclage
+c_p  <- 20.16  # progesterone per week
+
+# Prog cost for a given GA category
+v_c_wks <- c_p * wks
+
+# Mean delivery cost per pregnancy by GA
+c_del_28 <- 5489
+c_del_32 <- 5489
+c_del_34 <- 5489
+c_del_37 <- 5489
+c_del_term <- 5489
+
+# Vector of delivery costs by GA
+v_c_del_GA <- c(c_del_28, c_del_32, c_del_34, c_del_37, c_del_term)
+```
+
+## Step #1: Gestational age (GA) distributions by strategy
+
+Determine the proportion of patients in each gestational age group for each strategy.
+
+### Model structure: tree
+
+The Open Tree diagram shows the structure of the model for a *single strategy* branch. The strategies use identical tree structures with the only difference being whether or not treatment strategies are "on" or "off" for a given segment of the tree.
+
+```{r}
+# Tree model with output of GA distribution (shown for one strategy)
+OpenTree::open_tree(file_name = "Trees/CLS_tree", dir_name = getwd()) 
+```
+
+### Gestational age subtree
+
+```{r}
+## Function that calculates the gestational age subtree
+# Tree read top to bottom, arbitrarily 
+# Output: vector with length of v_GA_cat that contains probabilities of each GA category
+
+GA_subtree <- function(e_28. = 1, # 4 variables for the effectiveness of treatment for given GA category
+                       e_32. = 1,
+                       e_34. = 1,
+                       e_37. = 1,
+                       p_28.,     # 4 variables for the probability of delivery at GA category
+                       p_32.,
+                       p_34.,
+                       p_37.) {
+  
+  # Calculates the probability of ending up in a GA category
+  a <-      (e_28. * p_28.)                                                                           # < 28 wks
+  b <- (1 - (e_28. * p_28.)) *      (e_32. * p_32.)                                                   # 28-32 wks
+  c <- (1 - (e_28. * p_28.)) * (1 - (e_32. * p_32.)) *      (e_34. * p_34.)                           # 32-34 wks
+  d <- (1 - (e_28. * p_28.)) * (1 - (e_32. * p_32.)) * (1 - (e_34. * p_34.)) *      (e_37. * p_37.)   # 34-37 wks
+  e <- (1 - (e_28. * p_28.)) * (1 - (e_32. * p_32.)) * (1 - (e_34. * p_34.)) * (1 - (e_37. * p_37.))  # >= 37 wks (term)
+  
+  # Vector of probabilities for each GA category 
+  all_cat <- c("<28"   = a,
+               "28-32" = b, 
+               "32-34" = c,
+               "34-37" = d,
+               ">37"   = e)
+  
+  return(all_cat)
+}
+```
+
+### Subtree for cervical length (CL) measurements and intervention rates
+
+This function calculates probabilities for 7 subtrees that exist in the s2 and s3 strategies. Strategy 1 (s1) has no ultrasound CL measurements and no interventions, so the s1 GA distribution can be calculated with the GA_subtree only.
+
+```{r}
+## Function of CL measurement and treatment uptake possibilities with GA_subtree included at the end of each branch
+# Output of each branch is a vector of GA category probabilities of length v_GA_cat
+# Output of the function is the combined strategy GA probabilities (all, progesterone only, or cerclage only)
+
+CL_subtree <- function(p_cl25.,                  # 3 variables for the CL detection rates
+                       p_cl15.,
+                       e_cp_28. = rr_cp_28,      # 12 variables for treatment effect 
+                       e_cp_32. = rr_cp_32,      # Set at baseline to the treatment effect variables
+                       e_cp_34. = rr_cp_34,
+                       e_cp_37. = rr_cp_37,
+                       e_p_28. = rr_p_28,
+                       e_p_32. = rr_p_32,
+                       e_p_34. = rr_p_34,
+                       e_p_37. = rr_p_37,
+                       e_c_28. = rr_c_28,
+                       e_c_32. = rr_c_32,
+                       e_c_34. = rr_c_34,
+                       e_c_37. = rr_c_37,
+                       p_prog. = p_prog,        # 3 variables for progesterone and cerclage utilization rates
+                       p_pY_cerc. = p_pY_cerc,
+                       p_pN_cerc. = p_pN_cerc,
+                       p_cl15_28.,              # 8 variables for delivery GA probabilities (t1 vs. t2)
+                       p_cl15_32.,
+                       p_cl15_34.,
+                       p_cl15_37.,
+                       p_cl25_28.,              
+                       p_cl25_32.,
+                       p_cl25_34.,
+                       p_cl25_37.,
+                       GA_sub. ) {              # 11th subtree without default end prob (will include this function)
+  
+  # Tree read top to bottom arbitrarily
+  
+  # 1. CL <= 25, CL <= 15, Prog YES, Cerc YES
+  a <- p_cl25. * p_cl15. * p_prog. * p_pY_cerc. * GA_subtree(e_28. = e_cp_28.,
+                                                             e_32. = e_cp_32.,
+                                                             e_34. = e_cp_34.,
+                                                             e_37. = e_cp_37., 
+                                                             p_28. = p_cl15_28.,
+                                                             p_32. = p_cl15_32.,
+                                                             p_34. = p_cl15_34.,
+                                                             p_37. = p_cl15_37.)
+  
+  # 2. CL <= 25, CL <= 15, Prog YES, Cerc NO
+  b <- p_cl25. * p_cl15. * p_prog. * (1 - p_pY_cerc.) * GA_subtree(e_28. = e_p_28.,
+                                                                   e_32. = e_p_32.,
+                                                                   e_34. = e_p_34.,
+                                                                   e_37. = e_p_37., 
+                                                                   p_28. = p_cl15_28.,
+                                                                   p_32. = p_cl15_32.,
+                                                                   p_34. = p_cl15_34.,
+                                                                   p_37. = p_cl15_37.)
+  
+  # 3. CL <= 25, CL <= 15, Prog NO, Cerc YES
+  c <- p_cl25. * p_cl15. * (1 - p_prog.) * p_pN_cerc. * GA_subtree(e_28. = e_c_28.,
+                                                                   e_32. = e_c_32.,
+                                                                   e_34. = e_c_34.,
+                                                                   e_37. = e_c_37., 
+                                                                   p_28. = p_cl15_28.,
+                                                                   p_32. = p_cl15_32.,
+                                                                   p_34. = p_cl15_34.,
+                                                                   p_37. = p_cl15_37.)
+  
+  # 4. CL <= 25, CL <= 15, Prog NO, Cerc NO (no treatment)
+  d <- p_cl25. * p_cl15. * (1 - p_prog.) * (1 - p_pN_cerc.) * GA_subtree(p_28. = p_cl15_28.,
+                                                                         p_32. = p_cl15_32.,
+                                                                         p_34. = p_cl15_34.,
+                                                                         p_37. = p_cl15_37.)
+  
+  # 5. CL <= 25, CL > 15, Prog YES
+  e <- p_cl25. * (1 - p_cl15.) * p_prog. * GA_subtree(e_28. = e_p_28.,
+                                                      e_32. = e_p_32.,
+                                                      e_34. = e_p_34.,
+                                                      e_37. = e_p_37., 
+                                                      p_28. = p_cl25_28.,
+                                                      p_32. = p_cl25_32.,
+                                                      p_34. = p_cl25_34.,
+                                                      p_37. = p_cl25_37.)
+  
+  # 6. CL <= 25, CL > 15, Prog NO (no treatment)
+  f <- p_cl25. * (1 - p_cl15.) * (1 - p_prog.) * GA_subtree(p_28. = p_cl25_28.,
+                                                            p_32. = p_cl25_32.,
+                                                            p_34. = p_cl25_34.,
+                                                            p_37. = p_cl25_37.)
+  
+  # 7. WHEN t1 --> CL > 25 (no treatment), WHEN t2 --> 1-7 above
+  g <- (1 - p_cl25.) * GA_sub. 
+  
+  # For all strategies, this branch will end with the CL_subtree function
+  # The sub-function branch 7 will end with GA_subtree (no treatment)
+  
+  # Add the proportions from each branch to produce the overall bins for the given strategy
+  all    <- a + b + c + d + e + f + g  # All 7 branches
+  prog   <- a + b + e                  # Progesterone treated branches (GA distributions needed for costs)
+  cerc   <- sum(a + c)                 # Cerclage treatment branches (GA distributions not needed for costs) 
+  vscx   <- sum(a + b + c + d)         # Proportion with very short cervix (<= 15 mm)
+  scx    <- sum(e + f)
+  
+  return(list(all = all, 
+              p = prog, 
+              c = cerc,
+              vscx = vscx,
+              scx = scx))
+}
+```
+
+### Calculate the GA distributions for each strategy
+
+```{r}
+## TREE OUTPUTS BY STRATEGY ##
+
+## STRATEGY 1 
+
+# Subtree for second screen (t2) iteration (to be used to populate the full tree)
+# Treatment INACTIVE in the subtree
+s1_t2_branch <- CL_subtree(p_cl25. = p_cl25_t2,
+                           p_cl15. = p_cl15_t2,
+                           e_cp_28. = 1,      
+                           e_cp_32. = 1,
+                           e_cp_34. = 1,
+                           e_cp_37. = 1,
+                           e_p_28. = 1,
+                           e_p_32. = 1,
+                           e_p_34. = 1,
+                           e_p_37. = 1,
+                           e_c_28. = 1,
+                           e_c_32. = 1,
+                           e_c_34. = 1,
+                           e_c_37. = 1,
+                           p_cl15_28. = p_cl15_28_t2, 
+                           p_cl15_32. = p_cl15_32_t2,
+                           p_cl15_34. = p_cl15_34_t2,
+                           p_cl15_37. = p_cl15_37_t2,
+                           p_cl25_28. = p_cl25_28_t2, 
+                           p_cl25_32. = p_cl25_32_t2,
+                           p_cl25_34. = p_cl25_34_t2,
+                           p_cl25_37. = p_cl25_37_t2,
+                           GA_sub. = GA_subtree(p_28. = p_clN_28_t2,
+                                                p_32. = p_clN_32_t2,
+                                                p_34. = p_clN_34_t2,
+                                                p_37. = p_clN_37_t2))
+
+# Full s1 tree with t2 subtree called in branch 7 (see function)
+# Treatment INACTIVE in the subtree
+s1_tree <- CL_subtree(p_cl25. = p_cl25_t1,
+                      p_cl15. = p_cl15_t1,
+                      e_cp_28. = 1,      
+                      e_cp_32. = 1,
+                      e_cp_34. = 1,
+                      e_cp_37. = 1,
+                      e_p_28. = 1,
+                      e_p_32. = 1,
+                      e_p_34. = 1,
+                      e_p_37. = 1,
+                      e_c_28. = 1,
+                      e_c_32. = 1,
+                      e_c_34. = 1,
+                      e_c_37. = 1,
+                      p_cl15_28. = p_cl15_28_t1, 
+                      p_cl15_32. = p_cl15_32_t1,
+                      p_cl15_34. = p_cl15_34_t1,
+                      p_cl15_37. = p_cl15_37_t1,
+                      p_cl25_28. = p_cl25_28_t1, 
+                      p_cl25_32. = p_cl25_32_t1,
+                      p_cl25_34. = p_cl25_34_t1,
+                      p_cl25_37. = p_cl25_37_t1,
+                      GA_sub. = s1_t2_branch$all)   # <-- t2 subtree
+
+# Treatment INACTIVE in any t1 or t2 branches
+s1_GA <- s1_tree$all 
+
+## STRATEGY 2
+
+# Subtree for second screen (t2) iteration (to be used to populate the full tree)
+# Treatment INACTIVE in the subtree
+s2_t2_branch <- CL_subtree(p_cl25. = p_cl25_t2,
+                           p_cl15. = p_cl15_t2,
+                           e_cp_28. = 1,      
+                           e_cp_32. = 1,
+                           e_cp_34. = 1,
+                           e_cp_37. = 1,
+                           e_p_28. = 1,
+                           e_p_32. = 1,
+                           e_p_34. = 1,
+                           e_p_37. = 1,
+                           e_c_28. = 1,
+                           e_c_32. = 1,
+                           e_c_34. = 1,
+                           e_c_37. = 1,
+                           p_cl15_28. = p_cl15_28_t2, 
+                           p_cl15_32. = p_cl15_32_t2,
+                           p_cl15_34. = p_cl15_34_t2,
+                           p_cl15_37. = p_cl15_37_t2,
+                           p_cl25_28. = p_cl25_28_t2, 
+                           p_cl25_32. = p_cl25_32_t2,
+                           p_cl25_34. = p_cl25_34_t2,
+                           p_cl25_37. = p_cl25_37_t2,
+                           GA_sub. = GA_subtree(p_28. = p_clN_28_t2,
+                                                p_32. = p_clN_32_t2,
+                                                p_34. = p_clN_34_t2,
+                                                p_37. = p_clN_37_t2))
+
+# Full s2 tree with t2 subtree called in branch 7 (see function)
+# Treatment ACTIVE in the subtree
+s2_tree <- CL_subtree(p_cl25. = p_cl25_t1,
+                      p_cl15. = p_cl15_t1,
+                      p_cl15_28. = p_cl15_28_t1, 
+                      p_cl15_32. = p_cl15_32_t1,
+                      p_cl15_34. = p_cl15_34_t1,
+                      p_cl15_37. = p_cl15_37_t1,
+                      p_cl25_28. = p_cl25_28_t1, 
+                      p_cl25_32. = p_cl25_32_t1,
+                      p_cl25_34. = p_cl25_34_t1,
+                      p_cl25_37. = p_cl25_37_t1,
+                      GA_sub. = s2_t2_branch$all)   # <-- t2 subtree
+
+# Treatment INACTIVE in t2, ACTIVE in t1
+s2_GA <- s2_tree$all
+
+## STRATEGY 3
+
+# Subtree for second screen (t2) iteration (to be used to populate the full tree)
+# Treatment ACTIVE in the subtree
+s3_t2_branch <- CL_subtree(p_cl25. = p_cl25_t2,
+                           p_cl15. = p_cl15_t2,
+                           p_cl15_28. = p_cl15_28_t2, 
+                           p_cl15_32. = p_cl15_32_t2,
+                           p_cl15_34. = p_cl15_34_t2,
+                           p_cl15_37. = p_cl15_37_t2,
+                           p_cl25_28. = p_cl25_28_t2, 
+                           p_cl25_32. = p_cl25_32_t2,
+                           p_cl25_34. = p_cl25_34_t2,
+                           p_cl25_37. = p_cl25_37_t2,
+                           GA_sub. = GA_subtree(p_28. = p_clN_28_t2,
+                                                p_32. = p_clN_32_t2,
+                                                p_34. = p_clN_34_t2,
+                                                p_37. = p_clN_37_t2))
+
+# Full s3 tree with t2 subtree called in branch 7 (see function)
+# Treatment ACTIVE in the subtree
+s3_tree <- CL_subtree(p_cl25. = p_cl25_t1,
+                      p_cl15. = p_cl15_t1,
+                      p_cl15_28. = p_cl15_28_t1, 
+                      p_cl15_32. = p_cl15_32_t1,
+                      p_cl15_34. = p_cl15_34_t1,
+                      p_cl15_37. = p_cl15_37_t1,
+                      p_cl25_28. = p_cl25_28_t1, 
+                      p_cl25_32. = p_cl25_32_t1,
+                      p_cl25_34. = p_cl25_34_t1,
+                      p_cl25_37. = p_cl25_37_t1,
+                      GA_sub. = s3_t2_branch$all)   # <-- t2 subtree
+
+# Treatment ACTIVE in t2, ACTIVE in t1
+s3_GA <- s3_tree$all
+
+## Combine output into a table of GA distributions by strategy
+m_GA_dist <- cbind(round(s1_GA, 20),
+                   round(s2_GA, 20),
+                   round(s3_GA, 20))
+
+colnames(m_GA_dist) <- v_strats
+
+round(m_GA_dist, 4) 
+
+# Confirming all columns have a cumulative probability of 1
+apply(m_GA_dist, MARGIN = 2, FUN = sum)
+
+# Preterm probability at baseline (s1) for face validity
+sum(s1_GA) - s1_GA[5]
+
+# Plot of GA distribution by strategy 
+GA_plot <- data.frame(m_GA_dist) %>%
+  mutate(GA_cat = v_GA_cat) %>%
+  pivot_longer(cols = c("s1", "s2", "s3"), names_to = "strategy", values_to = "p") %>%
+  ggplot(aes(x = factor(GA_cat, v_GA_cat), y = p, fill = strategy)) + 
+  geom_col(position = "dodge", colour = "black") +
+  ylim(c(0,1)) +
+  scale_fill_manual(values = v_strat_colors, name = "Dominant strategy", labels = strat_names) +
+  labs(title = "Gestational age at delivery distribution",
+       x = "Gestational age at delivery",
+       y = "Probability") + 
+  theme_bw()
+
+GA_plot
+```
+
+## Step #2: Tree-related costs
+
+Costs are calculated for a unit of 1 (i.e. one pregnancy). The result can be multiplied for a population of size `n`.
+
+1. Ultrasound scans
+2. Progesterone prescription
+3. Cerclage
+4. Delivery
+
+```{r}
+## ULTRASOUND SCANS ##
+
+# Patients with negative screen have either 1 or 2 scans depending on strategy
+# Patients with positive screen have n_scans (see general setup)
+s1_c_s <- 0
+s2_c_s <- (p_cl25_t1)                                   * (c_s * n_scans) + ((1 - (p_cl25_t1))                                   * c_s * 1) 
+s3_c_s <- (p_cl25_t1 + ((1 - p_cl25_t1) * (p_cl25_t2))) * (c_s * n_scans) + ((1 - (p_cl25_t1 + ((1 - p_cl25_t1) * (p_cl25_t2)))) * c_s * 2)
+
+# Vector of ultrasound costs 
+v_c_s <- c(s1_c_s, s2_c_s, s3_c_s)
+
+## PROGESTERONE ##
+
+# GA distribution for branches with progesterone treatment
+# For s2, this includes only the t1 branches with the final sub-branch excluded
+s2_p <- s2_tree$p
+# Combining t1 and t2 components of the s3 tree (workaround since final sub-branch g is excluded in $p)
+s3_p <- s3_tree$p + ((1 - p_cl25_t1) * s3_t2_branch$p) 
+
+# Prog cost by strategy
+# v_c_wks = cost for a given GA category
+s1_c_p <- 0 # no one on progesterone
+s2_c_p <- sum(s2_p * v_c_wks) 
+s3_c_p <- sum(s3_p * v_c_wks)
+
+# Vector of progesterone costs
+v_c_p  <- c(s1_c_p, s2_c_p, s3_c_p)
+
+## CERCLAGE ##
+
+# Proportion of cases resulting in cerclage by strategy
+s2_cerc <- s2_tree$c
+# Combining t1 and t2 components of the s3 tree (workaround since sub-branch k is excluded in $c)
+s3_cerc <- s3_tree$c + ((1 - p_cl25_t1) * s3_t2_branch$c) 
+
+# Multiply the proportion with cerclage by the per-pregnancy cost
+s1_c_c <- 0
+s2_c_c <- s2_cerc * c_c
+s3_c_c <- s3_cerc * c_c
+
+# Vector of cerclage costs
+v_c_cerc <- c(s1_c_c, s2_c_c, s3_c_c)
+
+## DELIVERY COST ##
+
+# Weighted total cost for delivery with GA distribution 
+s1_c_del <- sum(s1_GA * v_c_del_GA)
+s2_c_del <- sum(s2_GA * v_c_del_GA)
+s3_c_del <- sum(s3_GA * v_c_del_GA)
+
+# Vector of delivery costs by strategy
+v_c_del <- c(s1_c_del, s2_c_del, s3_c_del)
+
+## TOTAL COSTS BY STRATEGY ##
+
+# Vector of total tree-associated costs
+v_tree_c <- v_c_s + v_c_p + v_c_cerc + v_c_del 
+
+# Summary of costs by strategy
+m_tree_c <- rbind(v_c_s, v_c_p, v_c_cerc, v_c_del, v_tree_c)
+m_tree_c2 <- cbind(v_c_s, v_c_p, v_c_cerc, v_c_del, v_tree_c)
+colnames(m_tree_c) <- v_strats
+rownames(m_tree_c) <- c("US", "Progesterone", "Cerclage", "Delivery", "TOTAL")
+
+preg_costs <- cbind(Component = rownames(m_tree_c), data.frame(round(m_tree_c, 2), row.names = NULL))
+
+preg_cost_table <- gt(preg_costs) %>%
+  tab_header(title = "Pregnancy-related Costs",
+             subtitle = "prices in Canadian $") %>%
+  tab_style(style = list(cell_text(weight = "bold")),
+            locations = cells_body(rows = 5))
+
+preg_cost_table
+
+# Export table
+#gtsave(preg_cost_table, filename = "Pregnancy-related Costs.png", path = "Results/")
+```
+
+## Step #3: Childhood outcomes
+
+This section includes all components after the baby is born including:
+
+(A) Initial neonatal costs (i.e. costs associated with the neonatal admission after delivery)
+(B) Markov model (cSTM) of costs and utilities from NICU discharge to 100 years
+
+### Parameters (including Markov)
+
+```{r}
+## GENERAL SETUP ##
+
+# cycle_length defined in the first section
+n_age_init <- 0 # Markov minimum age
+n_age_max <- 100 # Markov maximum age
+n_cycles <- (n_age_max - n_age_init)/ cycle_length # Number of cycles
+v_names_states <- c("A", "D") 
+# The 4 health states of the model:
+  # Alive (A) and Dead (D)
+
+n_states <- length(v_names_states) # Number of health states
+
+## INITIAL OUTCOME PROBABILITIES ##
+
+# Stillbirth GA category
+p_sb_28 <- 0.0007  # <= 28 wks
+p_sb_32 <- 0.0015 # 28-32 wks
+p_sb_34 <- 0.0020 # 32-34 wks
+p_sb_37 <- 0.0011 # 34-37 wks
+p_sb_term <- 0.0057 # > 37 wks (term)
+
+# Vector of stillbirth probabilities
+v_p_sb_GA <- c(p_sb_28, p_sb_32, p_sb_34, p_sb_37, p_sb_term)
+
+## TRANSITION PROBABILITIES ##
+
+# Time dependent mortality rates for GA category (A to D)
+# see "CLS_model_basecase_2.Rmd" for set-up 
+v_r_AD28 <- v_r_mort * v_hr_AD_28
+v_r_AD32 <- v_r_mort * v_hr_AD_32
+v_r_AD34 <- v_r_mort * v_hr_AD_34
+v_r_AD37 <- v_r_mort * v_hr_AD_37
+v_r_ADterm <- v_r_mort * v_hr_AD_term
+
+# Conversion to probabilities
+v_p_AD28 <- 1 - exp(-v_r_AD28 * cycle_length)
+v_p_AD32 <- 1 - exp(-v_r_AD32 * cycle_length)
+v_p_AD34 <- 1 - exp(-v_r_AD34 * cycle_length)
+v_p_AD37 <- 1 - exp(-v_r_AD37 * cycle_length)
+v_p_ADterm <- 1 - exp(-v_r_ADterm * cycle_length)
+# Add values to a list
+l_p_AD <- list(v_p_AD28, v_p_AD32, v_p_AD34, v_p_AD37, v_p_ADterm)
+
+## STATE UTILITIES ##
+
+# Dead state utility
+u_D  <- 0 
+
+# Annual utility for Alive state (see "CLS_model_bascease_2.Rmd" for calculations)
+v_q_28 <- v_q_28
+v_q_32 <- v_q_32
+v_q_34 <- v_q_34
+v_q_37 <- v_q_37
+v_q_term <- v_q_term
+
+# Annual discount rate for QALYs
+d_u  <- 0.015 
+
+## COSTS ##
+
+# Initial inpatient neonatal costs by GA
+c_n_28 <- 121650
+c_n_32 <- 42678
+c_n_34 <- 28034
+c_n_37 <- 17243
+c_n_term <- 17243
+v_c_n_GA <- c(c_n_28, c_n_32, c_n_34, c_n_37, c_n_term)
+
+# Probability of admission by GA 
+p_adm_28 <- 1
+p_adm_32 <- 1
+p_adm_34 <- 1
+p_adm_37 <- 0.46
+p_adm_term <- 0.07
+v_adm_GA <- c(p_adm_28, p_adm_32, p_adm_34, p_adm_37, p_adm_term)
+
+# Annual cost of dead state
+c_D <- 0
+
+# Annual cost of alive state (time-dependent)
+# See data in "CLS_model_bascease_2.Rmd"
+v_c_28 <- v_c_28
+v_c_32 <- v_c_32
+v_c_34 <- v_c_34
+v_c_37 <- v_c_37
+v_c_term  <- v_c_term
+
+# Annual discount rate for costs
+d_c <- 0.015
+```   
+
+### (A) Costs of initial neonatal admission (NICU)
+
+These costs represent the initial inpatient stay after delivery.
+
+```{r}
+# Strategy specific NICU costs, distributed by GA, assuming not stillborn and admitted
+v_c_n_s1 <- s1_GA * (1 - v_p_sb_GA) * v_adm_GA * v_c_n_GA
+v_c_n_s2 <- s2_GA * (1 - v_p_sb_GA) * v_adm_GA * v_c_n_GA
+v_c_n_s3 <- s3_GA * (1 - v_p_sb_GA) * v_adm_GA * v_c_n_GA
+
+# Sum of the costs across GA category (i.e. strategy total cost)
+s1_c_n <- sum(v_c_n_s1)
+s2_c_n <- sum(v_c_n_s2)
+s3_c_n <- sum(v_c_n_s3)
+
+# Vector of neonatal costs
+v_n_c <- c(s1_c_n, s2_c_n, s3_c_n)
+
+round(v_n_c, 2)
+```
+
+### (B) Cohort State Transition Model (cSTM, aka. Markov model)
+
+The Markov model uses GA category specific probabilities for initial states (Alive or Dead) and annual mortality. The markov chain and associated costs and utilities are calculated for each GA category, independent of the strategy. The GA category-specific output is then multiplied by the strategy-specific GA category distributions to calculate the total strategy costs and QALYs (i.e. a calculation by weights). For example, if we assume that preterm delivery is associated with greater annual cost in the Markov model, then those states with higher proportions of preterm delivery, will have a higher total cost.
+
+### Neonatal state distributions at time of birth (year 0)
+
+Using the output from the tree and GA-specific probabilities, we can populate the initial state of the markov model for each GA category. This is done based on stillbirth probabilities.
+
+```{r}
+## Determine the initial distribution (Alive or Dead) for each GA category
+  # Dependent on GA-specific probabilities of stillbirth (in-utero death)
+
+# Probability of entering each state by GA category
+v_p_sb <- v_p_sb_GA     # stillborn 
+v_p_a  <- 1 - v_p_sb_GA # live-born
+
+# Matrix of state distributions by GA category
+m_init_GA <- cbind(A = v_p_a, D = v_p_sb)
+rownames(m_init_GA) <- v_GA_cat
+
+round(m_init_GA, 5)
+
+# Confirm that for each GA category, the state sums = 1
+rowSums(m_init_GA)
+```
+
+### cSTM (aka. "Markov") transition probabilities
+
+Death rates are time-dependent (see `CLS_model_basecase_2.Rmd` for calculations).
+
+```{r}
+## Function that creates a transition probability array, given transition probabilities
+# Output is an array of transition probabilities
+
+trans_prob <- function(n_states.       = n_states,
+                       n_cycles.       = n_cycles,
+                       v_names_states. = v_names_states,
+                       v_p_AD.) {             
+  
+  # Initialize the transition probability array
+  a_P <- array(0, dim = c(n_states., n_states., n_cycles.),
+               dimnames = list(v_names_states., v_names_states., 0:(n_cycles - 1)))
+
+  ## Fill in transition probability array
+  # From A (row)
+  a_P["A", "D", ]   <- v_p_AD.
+  a_P["A", "A", ]   <- (1 - v_p_AD.)
+  # From D (row)
+  a_P["D", "D", ]   <- 1
+
+  return(a_P)
+}
+
+# Initiate an empty list of arrays for each GA cat
+a_P_GA <- vector(mode = "list", n_GA_cat)
+
+# Populate the list with a for-loop using *trans_prob* function
+for (i in 1: n_GA_cat){
+  a_P_GA[[i]] <- trans_prob(v_p_AD. = l_p_AD[[i]])
+}
+
+# Probability array by GA category
+a_P_28   <- a_P_GA[[1]]
+a_P_32   <- a_P_GA[[2]]
+a_P_34   <- a_P_GA[[3]] 
+a_P_37   <- a_P_GA[[4]]
+a_P_term <- a_P_GA[[5]]
+```
+
+### Markov chain for each GA category
+
+```{r}
+## Function for Markov chain, for a given GA category
+# Output is a matrix of a filled markov chain
+
+markov_chain <- function(GA_num.,                    # GA category number 
+                         a_P.,                       # GA category probability array
+                         n_cycles.       = n_cycles,
+                         n_states.       = n_states,
+                         v_names_states. = v_names_states,
+                         m_init.         = m_init_GA) {
+  
+  # Initiate an empty markov matrix 
+  m_M <- matrix(NA,
+                nrow = (n_cycles. + 1), ncol = n_states.,
+                dimnames = list(0: n_cycles., v_names_states.))
+  
+  # Store the initial state vector in the first row of the cohort trace
+  m_M[1, ] <- m_init.[GA_num., ]
+  
+  # Fill the matrix using the probability array 
+  for (t in 1: n_cycles.){
+    m_M[t+1, ] <- m_M[t, ] %*% a_P.[ , , t]
+  }
+  
+  return(m_M)
+}
+
+# Initiate an empty list of markov matrices for each GA cat
+l_m_M_GA <- vector(mode = "list", n_GA_cat)
+
+# Populate the list with a for-loop using *markov_chain* function
+for (i in 1: n_GA_cat){
+  l_m_M_GA[[i]] <- markov_chain(GA_num. = i,
+                              a_P. = a_P_GA[[i]])
+}
+
+# Markov chain results by GA 
+m_M_28   <- l_m_M_GA[[1]]
+m_M_32   <- l_m_M_GA[[2]]
+m_M_34   <- l_m_M_GA[[3]] 
+m_M_37   <- l_m_M_GA[[4]]
+m_M_term <- l_m_M_GA[[5]]
+
+# Example matrix output
+head(round(m_M_32, 3))
+
+# Example state distribution trend
+states_plot <- data.frame(m_M_28) %>%
+  mutate(year = c(0:100)) %>%
+  pivot_longer(cols = c("A", "D"), names_to = "state", values_to = "p") %>%
+  ggplot(aes(x = year, y = p, color = state)) +
+  geom_line() +
+  scale_color_manual(values = c("darkgreen", "darkred")) + 
+  theme_bw()
+
+states_plot
+```
+
+### Markov costs
+
+```{r}
+## COSTS ##
+
+## Function to calculate total costs for a given gestational age category
+
+markov_costs <- function(m_M.,
+                         v_c_A.,
+                         n_cycles. = n_cycles,
+                         cycle_length. = cycle_length,
+                         n_states. = n_states,
+                         v_names_states. = v_names_states,
+                         d_c. = d_c,
+                         c_D. = c_D) {
+  
+  # Initiate an empty matrix for costs
+  m_ann_cost <- matrix(NA,
+                       nrow = (n_cycles. + 1), ncol = n_states.,
+                       dimnames = list(0: n_cycles., v_names_states.))
+  
+  # Populate the matrix with state costs
+  m_ann_cost[, 1] <- v_c_A.
+  m_ann_cost[, 2] <- c_D.
+  
+  ## Annual discount weights for costs
+  v_dwc <- 1 / (( 1 + (d_c. * cycle_length.)) ^ (0 : n_cycles.))
+  
+  # Initiate an empty matrix for costs
+  m_c_GA <- matrix(NA,
+                   nrow = (n_cycles. + 1), ncol = 1,
+                   dimnames = list(0: n_cycles., "Cost"))
+  
+  # Populate the single column matrix (state * state_cost)
+  for (t in 0: n_cycles. + 1){
+    m_c_GA[t, ] <- m_M.[t, ] %*% m_ann_cost[t, ]
+  }
+  
+  # Discount and sum the costs to give the GA category total
+  c_GA <- sum(m_c_GA * v_dwc)
+  
+  return(list(annual = m_ann_cost,   # Annual costs by state for GA category
+              total  = c_GA,         # Total costs for GA category
+              disc   = v_dwc))       # Annual discount rate (not GA specific)
+}
+
+# Calculation of total cost in markov chain by GA
+c_M_28   <- markov_costs(m_M. = m_M_28, v_c_A. = v_c_28)$total
+c_M_32   <- markov_costs(m_M. = m_M_32, v_c_A. = v_c_32)$total
+c_M_34   <- markov_costs(m_M. = m_M_34, v_c_A. = v_c_34)$total
+c_M_37   <- markov_costs(m_M. = m_M_37, v_c_A. = v_c_37)$total
+c_M_term <- markov_costs(m_M. = m_M_term, v_c_A. = v_c_term)$total
+
+# Vector of costs by GA
+v_c_M_GA <- c(c_M_28, c_M_32, c_M_34, c_M_37, c_M_term)
+
+## STRATEGY TOTALS - COSTS ##
+
+# Product of costs by GA * GA distribution for a strategy
+c_s1 <- sum(v_c_M_GA * s1_GA)
+c_s2 <- sum(v_c_M_GA * s2_GA)
+c_s3 <- sum(v_c_M_GA * s3_GA)
+
+# Vector of strategy costs
+v_M_costs <- c(s1 = c_s1, s2 = c_s2, s3 = c_s3)
+```
+
+### Markov QALYs
+
+```{r}
+## QALYs ##
+
+## Function to calculate total QALYs for a given gestational age category
+
+markov_qaly <- function(m_M.,
+                        v_q.,
+                        n_cycles. = n_cycles,
+                        cycle_length. = cycle_length,
+                        n_states. = n_states,
+                        v_names_states. = v_names_states,
+                        d_u. = d_u,
+                        u_D. = u_D) {
+  
+  # Initiate an empty matrix for utilities
+  m_ann_qaly <- matrix(NA,
+                       nrow = (n_cycles. + 1), ncol = n_states.,
+                       dimnames = list(0: n_cycles., v_names_states.))
+  
+  # Populate the matrix with state utility
+  m_ann_qaly[, 1] <- v_q.
+  m_ann_qaly[, 2] <- u_D.
+  
+  ## Annual discount weights for costs
+  v_dwu <- 1 / (( 1 + (d_u. * cycle_length.)) ^ (0 : n_cycles.))
+  
+  # Initiate an empty matrix for costs
+  m_q_GA <- matrix(NA,
+                   nrow = (n_cycles. + 1), ncol = 1,
+                   dimnames = list(0: n_cycles., "Cost"))
+  
+  # Populate the single column matrix (state * state_utility)
+  for (t in 0: n_cycles. + 1){
+    m_q_GA[t, ] <- m_M.[t, ] %*% m_ann_qaly[t, ]
+  }
+  
+  # Discount and sum the QALYs to give the GA category total
+  q_GA <- sum(m_q_GA * v_dwu)
+  
+  return(list(annual = m_ann_qaly,  # Annual utilities by state for GA category
+              total = q_GA,         # Total QALYs for GA category
+              disc = v_dwu))        # Annual discount rate (not GA specific)
+}
+
+# Calculation of total QALYs in markov chain by GA
+q_M_28   <- markov_qaly(m_M. = m_M_28, v_q. = v_q_28)$total
+q_M_32   <- markov_qaly(m_M. = m_M_32, v_q. = v_q_32)$total
+q_M_34   <- markov_qaly(m_M. = m_M_34, v_q. = v_q_34)$total
+q_M_37   <- markov_qaly(m_M. = m_M_37, v_q. = v_q_37)$total
+q_M_term <- markov_qaly(m_M. = m_M_term, v_q. = v_q_term)$total
+
+# Vector of QALYs by GA
+v_q_M_GA <- c(q_M_28, q_M_32, q_M_34, q_M_37, q_M_term)
+
+## STRATEGY TOTALS - QALYs ##
+
+# Product of QALYs by GA * GA distribution for a strategy
+q_s1 <- sum(v_q_M_GA * s1_GA) * twin_factor
+q_s2 <- sum(v_q_M_GA * s2_GA) * twin_factor
+q_s3 <- sum(v_q_M_GA * s3_GA) * twin_factor
+
+# Vector of strategy QALYs
+v_M_qaly <- c(s1 = q_s1, s2 = q_s2, s3 = q_s3)
+```
+
+## Model clinical outcomes
+
+For each strategy:
+
+Clinical outcomes
+* CL <= 15 mm
+* CL >15 x <= 25 mm
+* Progesterone use
+* Cerclage use
+* Pre-term birth (< 37 wks)
+* Extreme pre-term birth (< 28 wks)
+* Still-births
+* Life-expectancy
+
+```{r}
+## Proportion screen positive
+# CL <= 15
+cl15_s1 <- 0
+cl15_s2 <- s2_tree$vscx 
+cl15_s3 <- s3_tree$vscx + ((1 - p_cl25_t1) * s3_t2_branch$vscx)
+v_cl15 <- c(cl15_s1, cl15_s2, cl15_s3)
+
+# CL <=25
+cl25_s1 <- 0
+cl25_s2 <- s2_tree$scx
+cl25_s3 <- s3_tree$scx + ((1 - p_cl25_t1) * s3_t2_branch$scx)
+v_cl25 <- c(cl25_s1, cl25_s2, cl25_s3) + v_cl15
+
+## Patients on progesterone (see Tree-related costs)
+v_p <- c(0, sum(s2_p), sum(s3_p))
+
+## Patients having cerclage (see Tree-related costs)
+v_cerc <- c(0, s2_cerc, s3_cerc)
+
+## PRE-TERM (< 37 weeks) probability
+n_pret37_s1 <- sum(s1_GA[-5])
+n_pret37_s2 <- sum(s2_GA[-5])
+n_pret37_s3 <- sum(s3_GA[-5])
+
+# Probability preterm deliveries by strategy
+v_n_pret37 <- c(n_pret37_s1, n_pret37_s2, n_pret37_s3)
+
+## PRE-TERM (< 34 weeks) probability
+n_pret34_s1 <- sum(s1_GA[1:3])
+n_pret34_s2 <- sum(s2_GA[1:3])
+n_pret34_s3 <- sum(s3_GA[1:3])
+
+# Probability of preterm deliveries by strategy
+v_n_pret34 <- c(n_pret34_s1, n_pret34_s2, n_pret34_s3)
+
+## PRE-TERM (< 32 weeks)
+# Number of preterm deliveries per n pregnancies
+n_pret32_s1 <- sum(s1_GA[1:2])
+n_pret32_s2 <- sum(s2_GA[1:2])
+n_pret32_s3 <- sum(s3_GA[1:2])
+
+# Number of preterm deliveries by strategy
+v_n_pret32 <- c(n_pret32_s1, n_pret32_s2, n_pret32_s3)
+
+## EXTREME PRE-TERM (<28 weeks)
+n_pret28_s1 <- s1_GA[1]
+n_pret28_s2 <- s2_GA[1]
+n_pret28_s3 <- s3_GA[1]
+
+# Number of preterm deliveries by strategy
+v_n_pret28 <- c(n_pret28_s1, n_pret28_s2, n_pret28_s3)
+
+## STILLBIRTHS
+# Probability of stillbirths by strategy per n pregnancies
+n_sb_s1 <- sum(v_p_sb_GA * s1_GA) * twin_factor
+n_sb_s2 <- sum(v_p_sb_GA * s2_GA) * twin_factor
+n_sb_s3 <- sum(v_p_sb_GA * s3_GA) * twin_factor
+
+# Number of stillbirths by strategy
+v_n_sb <- c(n_sb_s1, n_sb_s2, n_sb_s3)
+
+## LIFE-EXPECTANCY
+# Assumption: state transition occurs at the beginning of each cycle
+# (i.e. if you are alive in a given cycle, you are expected to live to the end of the year)
+
+# Function to calculate life expectancy for each GA Markov chain
+life_exp <- function(m.){
+  
+  # Select only the alive state and add end zero
+  # Zero is to allow the last line to be counted
+  a <- c(m.[,1], 0)
+ 
+  # Empty vector
+  v <- c()
+  
+  # For each row, determine prop. that died 
+  for (i in 1:length(a)){
+    v[i] <- a[i] - a[i+1]
+  }
+  
+  # Multiply prop by years lived
+  # Remove the NA (for the 0 row)
+  le <- v[-102] * c(1:101)
+  
+  # Returns weighted average
+  return(sum(le))
+}
+
+# Calculate LE for each GA category
+le_28 <- life_exp(m. = m_M_28)
+le_32 <- life_exp(m. = m_M_32)
+le_34 <- life_exp(m. = m_M_34)
+le_37 <- life_exp(m. = m_M_37)
+le_term <- life_exp(m. = m_M_term)
+v_le <- c(le_28, le_32, le_34, le_37, le_term)
+
+# Calculate LE for each strategy
+le_s1 <- sum(v_le * s1_GA) * twin_factor
+le_s2 <- sum(v_le * s2_GA) * twin_factor
+le_s3 <- sum(v_le * s3_GA) * twin_factor
+v_le_strat <- c(le_s1, le_s2, le_s3)
+
+# TABLE: CLINICAL OUTCOMES
+t_clin <- data.frame("strategy" = v_strats,
+                     "CL15" = round(v_cl15, 3),
+                     "CL25" = round(v_cl25, 3),
+                     "cerclage" = round(v_cerc, 3),
+                     "progest" = round(v_p, 3),
+                     "ptb37" = round(v_n_pret37, 3),
+                     "ptb34" = round(v_n_pret34, 3),
+                     "ptb32" = round(v_n_pret32, 3),
+                     "ptb28" = round(v_n_pret28, 3), 
+                     "stillbirths" = round(v_n_sb, 3),
+                     "LE" = round(v_le_strat, 2)) # For one twin
+
+clin_table <- gt(t_clin, rowname_col = "Strategy") %>%
+  tab_header(title = "Clinical Outcomes")
+
+clin_table
+
+# Export table
+#gtsave(clin_table, filename = "Clinical Results Table.png", path = "Results/")
+```
+
+## Model cost-effectiveness analaysis
+
+Cost-effectiveness analysis:
+
+1. Cost ($)
+2. QALYs
+3. Incremental costs
+4. Incremental QALYs
+5. ICER ($/QALY)
+6. Net monetary benefit (NMB)
+
+```{r}
+# Total model costs: 1) tree-related, 2) Neonatal inpatient, and 3) Markov costs
+v_total_costs <- (v_tree_c + (v_n_c * twin_factor) + (v_M_costs * twin_factor))
+
+# Incrememental costs
+v_i_c <- c(v_total_costs[1] - v_total_costs[1],
+           v_total_costs[2] - v_total_costs[1], 
+           v_total_costs[3] - v_total_costs[1])
+
+# Incremental QALYs
+v_i_q <- c(v_M_qaly[1] - v_M_qaly[1],
+           v_M_qaly[2] - v_M_qaly[1], 
+           v_M_qaly[3] - v_M_qaly[1])
+
+# ICER
+v_ICER <- v_i_c / v_i_q
+
+# NMB
+v_NMB <- (v_M_qaly * wtp) - v_total_costs
+v_iNMB <- c(v_NMB[1] - v_NMB[1],
+            v_NMB[2] - v_NMB[1], 
+            v_NMB[3] - v_NMB[1])
+
+# Status
+v_status <- c(s1 = "D", s2 = "D", s3 = "ND")
+
+# TABLE: COST BREAKDOWN
+t_costs <- data.frame(Strategy  = v_strats,
+                      Pregnancy = round(v_tree_c, 2),
+                      NICU      = round(v_n_c, 2),
+                      Markov    = round(v_M_costs, 2),
+                      Total     = round(v_total_costs, 2))
+
+Costs_table <- gt(t_costs) %>%
+  tab_header(title = "Model Costs",
+             subtitle = "Values in 2023 CAD dollars") %>%
+  tab_footnote(footnote = "Cost per pregnancy.",
+               locations = cells_column_labels(columns = "Pregnancy")) %>%
+  tab_footnote(footnote = "Cost per twin pair.",
+               locations = cells_column_labels(columns = c("NICU", "Markov")))
+
+Costs_table
+
+# TABLE: COST-EFFECTIVENESS 
+t_CEA <- data.frame(Strategy = v_strats,
+                    Costs = round(v_total_costs, 2),
+                    QALYs = round(v_M_qaly, 2),
+                    NMB = v_NMB,
+                    IC = round(v_i_c, 2),
+                    IQ = round(v_i_q, 2),
+                    INMB = round(v_iNMB, 2),
+                    Status = v_status)
+
+CEA_table <- gt(t_CEA) %>%
+  tab_header(title = "Cost-effectivness Analysis") %>%
+  tab_footnote(footnote = "Costs in 2023 CAD dollars.",
+               locations = cells_column_labels(columns = c("Costs", "NMB", "INMB"))) %>%
+  tab_footnote(footnote = "QALYs = quality adjusted life years, NMB = net monetary benefit, IC = incremental costs, IQ= incremental QALYs, INMB = incremental NMB, D = dominated, ND = not dominated.") %>%
+  tab_spanner(label = "Compared to s1", columns = c("IC", "IQ", "INMB")) 
+
+CEA_table
+
+# Export tables
+#gtsave(Costs_table, filename = "All Costs Table.png", path = "Results/")
+#gtsave(CEA_table, filename = "Cost-effectiveness Table.png", path = "Results/")
+```
+
+### Cost-utility Plot
+
+```{r}
+# PLOT: Incremental costs vs. incremental QALY
+CEA_plot <- ggplot(data = t_CEA, aes(x = QALYs, y = Costs)) + 
+  geom_point(aes(color = Strategy), size = 3) +
+  #geom_label(aes(label = Strategy), nudge_x = 0, nudge_y = 0.1) +
+  labs(x = "QALYs", 
+       y = "Costs ($)",
+       title = "Cost-utility by strategy") +
+  #geom_hline(aes(yintercept = 0)) +
+  #geom_vline(aes(xintercept = 0)) +
+  theme_bw(base_size = 13)
+
+CEA_plot
+
+#ggsave(plot = CEA_plot, filename = "CEA plot.jpg", path = "Results/", width = 8, height = 5)
+```
