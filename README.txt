@@ -3,10 +3,11 @@ INVENTORY OF PROJECT FILES
 * To start *
 
 Download the content of this project and open "Twin CLS Project - R files.Rproj" with R studio.
+Relevant libraries are listed in the code, otherwise no additional files are required to run all of the code within.
 
 * Folders *
 
-DATA: contains .csv files that are used in R
+DATA: contains .csv and .txt files that are used in R
 RESULTS: location where relevant plots and .csv files are saved
 TREES: .json decision tree files
 
